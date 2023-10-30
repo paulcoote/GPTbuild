@@ -3,7 +3,7 @@
 This repo contains sample code for a simple chat webapp that integrates with Azure OpenAI. Note: some portions of the app use preview APIs.
 
 ## Prerequisites
-- An existing Azure OpenAI resource and model deployment of a chat model (e.g. `gpt-35-turbo`, `gpt-4`)
+- An existing Azure OpenAI resource and model deployment of a chat model (e.g. `gpt-35-turbo-16k`, `gpt-4`)
 - To use Azure OpenAI on your data: an existing Azure Cognitive Search resource and index.
 
 ## Deploy the app
@@ -61,11 +61,27 @@ Please see the [section below](#add-an-identity-provider) for important informat
     - `AZURE_SEARCH_FILENAME_COLUMN`
     - `AZURE_SEARCH_TITLE_COLUMN`
     - `AZURE_SEARCH_URL_COLUMN`
+    - `AZURE_SEARCH_VECTOR_COLUMNS`
+    - `AZURE_SEARCH_QUERY_TYPE`
+    - `AZURE_SEARCH_PERMITTED_GROUPS_COLUMN`
+    - `AZURE_SEARCH_STRICTNESS`
+    - `AZURE_OPENAI_EMBEDDING_NAME`
 
 3. Start the app with `start.cmd`. This will build the frontend, install backend dependencies, and then start the app.
 4. You can see the local running app at http://127.0.0.1:5000.
 
+#### Local Setup: Enable Chat History
+To enable chat history, you will need to set up CosmosDB resources. The ARM template in the `infrastructure` folder can be used to deploy an app service and a CosmosDB with the database and container configured. Then specify these additional environment variables: 
+- `AZURE_COSMOSDB_ACCOUNT`
+- `AZURE_COSMOSDB_DATABASE`
+- `AZURE_COSMOSDB_CONVERSATIONS_CONTAINER`
+- `AZURE_COSMOSDB_ACCOUNT_KEY`
+
+As above, start the app with `start.cmd`, then visit the local running app at http://127.0.0.1:5000.
+
 #### Deploy with the Azure CLI
+**NOTE**: If you've made code changes, be sure to **build the app code** with `start.cmd` or `start.sh` before you deploy, otherwise your changes will not be picked up. If you've updated any files in the `frontend` folder, make sure you see updates to the files in the `static` folder before you deploy.
+
 You can use the [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) to deploy the app from your local machine. Make sure you have version 2.48.1 or later.
 
 If this is your first time deploying the app, you can use [az webapp up](https://learn.microsoft.com/en-us/cli/azure/webapp?view=azure-cli-latest#az-webapp-up). Run the following command from the root folder of the repo, updating the placeholder values to your desired app name, resource group, location, and subscription. You can also change the SKU if desired.
@@ -77,8 +93,6 @@ If you've deployed the app previously, first run this command to update the apps
 `az webapp config appsettings set -g <resource-group-name> -n <existing-app-name> --settings WEBSITE_WEBDEPLOY_USE_SCM=false`
 
 Check the runtime stack for your app by viewing the app service resource in the Azure Portal. If it shows "Python - 3.10", use `PYTHON:3.10` in the runtime argument below. If it shows "Python - 3.11", use `PYTHON:3.11` in the runtime argument below. 
-
-**Note:** If the runtime is "DOCKER|fruoccopublic.azurecr.io/sample-app-aoai-chatgpt:latest" from One-Click Azure Deployment, redeploying with `az webapp up` is not compatible. Use the command above to create a new app.
 
 Check the SKU in the same way. Use the abbreviated SKU name in the argument below, e.g. for "Basic (B1)" the SKU is `B1`. 
 
@@ -100,8 +114,50 @@ const getUserInfoList = async () => {
 }
 ```
 
-## Best Practices
-Feel free to fork this repository and make your own modifications to the UX or backend logic. For example, you may want to expose some of the settings in `app.py` in the UI for users to try out different behaviors. We recommend keeping these best practices in mind:
+## Common Customization Scenarios
+Feel free to fork this repository and make your own modifications to the UX or backend logic. For example, you may want to change aspects of the chat display, or expose some of the settings in `app.py` in the UI for users to try out different behaviors. 
+
+### Updating the default chat logo and headers
+The landing chat page logo and headers are specified in `frontend/src/pages/chat/Chat.tsx`:
+```
+<Stack className={styles.chatEmptyState}>
+    <img
+        src={Azure}
+        className={styles.chatIcon}
+        aria-hidden="true"
+    />
+    <h1 className={styles.chatEmptyStateTitle}>Start chatting</h1>
+    <h2 className={styles.chatEmptyStateSubtitle}>This chatbot is configured to answer your questions</h2>
+</Stack>
+```
+To update the logo, change `src={Azure}` to point to your own SVG file, which you can put in `frontend/src/assets`/
+To update the headers, change the strings "Start chatting" and "This chatbot is configured to answer your questions" to your desired values.
+
+### Changing Citation Display
+The Citation panel is defined at the end of `frontend/src/pages/chat/Chat.tsx`. The citations returned from Azure OpenAI On Your Data will include `content`, `title`, `filepath`, and in some cases `url`. You can customize the Citation section to use and display these as you like. For example, the "View Source" button will open the citation URL in a new tab when clicked:
+```
+const onViewSource = (citation: Citation) => {
+        if (citation.url) {
+            window.open(citation.url, "_blank");
+        }
+    };
+
+<span 
+        title={activeCitation.url} 
+        tabIndex={0} 
+        role="link" 
+        onClick={() => onViewSource(activeCitation)} 
+        onKeyDown={e => e.key === "Enter" || e.key === " " ? onViewSource(activeCitation) : null}
+        className={styles.viewSourceButton}
+        aria-label={activeCitation.url}
+    >
+        View Source
+</span>
+```
+
+
+### Best Practices
+We recommend keeping these best practices in mind:
 
 - Reset the chat session (clear chat) if the user changes any settings. Notify the user that their chat history will be lost.
 - Clearly communicate to the user what impact each setting will have on their experience.
@@ -118,16 +174,21 @@ Note: settings starting with `AZURE_SEARCH` are only needed when using Azure Ope
 |AZURE_SEARCH_INDEX||The name of your Azure Cognitive Search Index|
 |AZURE_SEARCH_KEY||An **admin key** for your Azure Cognitive Search resource|
 |AZURE_SEARCH_USE_SEMANTIC_SEARCH|False|Whether or not to use semantic search|
+|AZURE_SEARCH_QUERY_TYPE|simple|Query type: simple, semantic, vector, vectorSimpleHybrid, or vectorSemanticHybrid. Takes precedence over AZURE_SEARCH_USE_SEMANTIC_SEARCH|
 |AZURE_SEARCH_SEMANTIC_SEARCH_CONFIG||The name of the semantic search configuration to use if using semantic search.|
 |AZURE_SEARCH_TOP_K|5|The number of documents to retrieve from Azure Cognitive Search.|
 |AZURE_SEARCH_ENABLE_IN_DOMAIN|True|Limits responses to only queries relating to your data.|
 |AZURE_SEARCH_CONTENT_COLUMNS||List of fields in your Azure Cognitive Search index that contains the text content of your documents to use when formulating a bot response. Represent these as a string joined with "|", e.g. `"product_description|product_manual"`|
-|AZURE_SEARCH_FILENAME_COLUMN||`AZURE_SEARCH_FILENAME_COLUMN`: Field from your Azure Cognitive Search index that gives a unique idenitfier of the source of your data to display in the UI.|
+|AZURE_SEARCH_FILENAME_COLUMN|| Field from your Azure Cognitive Search index that gives a unique idenitfier of the source of your data to display in the UI.|
 |AZURE_SEARCH_TITLE_COLUMN||Field from your Azure Cognitive Search index that gives a relevant title or header for your data content to display in the UI.|
 |AZURE_SEARCH_URL_COLUMN||Field from your Azure Cognitive Search index that contains a URL for the document, e.g. an Azure Blob Storage URI. This value is not currently used.|
+|AZURE_SEARCH_VECTOR_COLUMNS||List of fields in your Azure Cognitive Search index that contain vector embeddings of your documents to use when formulating a bot response. Represent these as a string joined with "|", e.g. `"product_description|product_manual"`|
+|AZURE_SEARCH_PERMITTED_GROUPS_COLUMN||Field from your Azure Cognitive Search index that contains AAD group IDs that determine document-level access control.|
+|AZURE_SEARCH_STRICTNESS|3|Integer from 1 to 5 specifying the strictness for the model limiting responses to your data.|
 |AZURE_OPENAI_RESOURCE||the name of your Azure OpenAI resource|
 |AZURE_OPENAI_MODEL||The name of your model deployment|
-|AZURE_OPENAI_MODEL_NAME|gpt-35-turbo|The name of the model|
+|AZURE_OPENAI_ENDPOINT||The endpoint of your Azure OpenAI resource.|
+|AZURE_OPENAI_MODEL_NAME|gpt-35-turbo-16k|The name of the model|
 |AZURE_OPENAI_KEY||One of the API keys of your Azure OpenAI resource|
 |AZURE_OPENAI_TEMPERATURE|0|What sampling temperature to use, between 0 and 2. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic. A value of 0 is recommended when using your data.|
 |AZURE_OPENAI_TOP_P|1.0|An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. We recommend setting this to 1.0 when using your data.|
@@ -136,6 +197,7 @@ Note: settings starting with `AZURE_SEARCH` are only needed when using Azure Ope
 |AZURE_OPENAI_SYSTEM_MESSAGE|You are an AI assistant that helps people find information.|A brief description of the role and tone the model should use|
 |AZURE_OPENAI_PREVIEW_API_VERSION|2023-06-01-preview|API version when using Azure OpenAI on your data|
 |AZURE_OPENAI_STREAM|True|Whether or not to use streaming for the response|
+|AZURE_OPENAI_EMBEDDING_NAME||The name of your embedding model deployment if using vector search.
 
 
 ## Contributing
