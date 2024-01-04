@@ -6,6 +6,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from 'remark-gfm'
 import rehypeRaw from "rehype-raw";
 import uuid from 'react-uuid';
+import { isEmpty } from "lodash-es";
 
 import styles from "./Chat.module.css";
 import Azure from "../../assets/Azure.svg";
@@ -40,6 +41,7 @@ const enum messageStatus {
 
 const Chat = () => {
     const appStateContext = useContext(AppStateContext)
+    const AUTH_ENABLED = appStateContext?.state.frontendSettings?.auth_enabled === "true" ;
     const chatMessageStreamEnd = useRef<HTMLDivElement | null>(null);
     const [isLoading, setIsLoading] = useState<boolean>(false);
     const [showLoadingMessage, setShowLoadingMessage] = useState<boolean>(false);
@@ -67,6 +69,8 @@ const Chat = () => {
         styles: { main: { maxWidth: 450 } },
     }
 
+    const [ASSISTANT, TOOL, ERROR] = ["assistant", "tool", "error"]
+
     useEffect(() => {
         if(appStateContext?.state.isCosmosDBAvailable?.status === CosmosDBStatus.NotWorking && appStateContext.state.chatHistoryLoadingState === ChatHistoryLoadingState.Fail && hideErrorDialog){
             let subtitle = `${appStateContext.state.isCosmosDBAvailable.status}. Please contact the site administrator.`
@@ -84,14 +88,46 @@ const Chat = () => {
             setErrorMsg(null)
         }, 500);
     }
-    
+
+    useEffect(() => {
+       setIsLoading(appStateContext?.state.chatHistoryLoadingState === ChatHistoryLoadingState.Loading)
+    }, [appStateContext?.state.chatHistoryLoadingState])
+
     const getUserInfoList = async () => {
+        if (!AUTH_ENABLED) {
+            setShowAuthMessage(false);
+            return;
+        }
         const userInfoList = await getUserInfo();
         if (userInfoList.length === 0 && window.location.hostname !== "127.0.0.1") {
             setShowAuthMessage(true);
         }
         else {
             setShowAuthMessage(false);
+        }
+    }
+
+    let assistantMessage = {} as ChatMessage
+    let toolMessage = {} as ChatMessage
+    let assistantContent = ""
+
+    const processResultMessage = (resultMessage: ChatMessage, userMessage: ChatMessage, conversationId?: string) => {
+        if (resultMessage.role === ASSISTANT) {
+            assistantContent += resultMessage.content
+            assistantMessage = resultMessage
+            assistantMessage.content = assistantContent
+        }
+
+        if (resultMessage.role === TOOL) toolMessage = resultMessage
+
+        if (!conversationId) {
+            isEmpty(toolMessage) ?
+                setMessages([...messages, userMessage, assistantMessage]) :
+                setMessages([...messages, userMessage, toolMessage, assistantMessage]);
+        } else {
+            isEmpty(toolMessage) ?
+                setMessages([...messages, assistantMessage]) :
+                setMessages([...messages, toolMessage, assistantMessage]);
         }
     }
 
@@ -133,8 +169,7 @@ const Chat = () => {
         setMessages(conversation.messages)
         
         const request: ConversationRequest = {
-            messages: [...conversation.messages.filter((answer) => answer.role !== "error")]
-            // messages: [...conversation.messages.filter((answer) => answer.role === "error")]
+            messages: [...conversation.messages.filter((answer) => answer.role !== ERROR)]
         };
 
         let result = {} as ChatResponse;
@@ -160,19 +195,17 @@ const Chat = () => {
                                 obj.date = new Date().toISOString();
                             })
                             setShowLoadingMessage(false);
-                            if(!conversationId){
-                                setMessages([...messages, userMessage, ...result.choices[0].messages]);
-                            }else{
-                                setMessages([...messages, ...result.choices[0].messages]);
-                            }
+                            result.choices[0].messages.forEach((resultObj) => {
+                                processResultMessage(resultObj, userMessage, conversationId);
+                            })
                             runningText = "";
                         }
                         catch { }
                     });
                 }
-                conversation.messages.push(...result.choices[0].messages)
+                conversation.messages.push(toolMessage, assistantMessage)
                 appStateContext?.dispatch({ type: 'UPDATE_CURRENT_CHAT', payload: conversation });
-                setMessages([...messages, ...result.choices[0].messages]);
+                setMessages([...messages, toolMessage, assistantMessage]);
             }
             
         } catch ( e )  {
@@ -186,7 +219,7 @@ const Chat = () => {
                 }
                 let errorChatMsg: ChatMessage = {
                     id: uuid(),
-                    role: "error",
+                    role: ERROR,
                     content: errorMessage,
                     date: new Date().toISOString()
                 }
@@ -233,12 +266,12 @@ const Chat = () => {
             }else{
                 conversation.messages.push(userMessage);
                 request = {
-                    messages: [...conversation.messages.filter((answer) => answer.role !== "error")]
+                    messages: [...conversation.messages.filter((answer) => answer.role !== ERROR)]
                 };
             }
         }else{
             request = {
-                messages: [userMessage].filter((answer) => answer.role !== "error")
+                messages: [userMessage].filter((answer) => answer.role !== ERROR)
             };
             setMessages(request.messages)
         }
@@ -248,7 +281,7 @@ const Chat = () => {
             if(!response?.ok){
                 let errorChatMsg: ChatMessage = {
                     id: uuid(),
-                    role: "error",
+                    role: ERROR,
                     content: "There was an error generating a response. Chat history can't be saved at this time. If the problem persists, please contact the site administrator.",
                     date: new Date().toISOString()
                 }
@@ -294,11 +327,9 @@ const Chat = () => {
                                 obj.date = new Date().toISOString();
                             })
                             setShowLoadingMessage(false);
-                            if(!conversationId){
-                                setMessages([...messages, userMessage, ...result.choices[0].messages]);
-                            }else{
-                                setMessages([...messages, ...result.choices[0].messages]);
-                            }
+                            result.choices[0].messages.forEach((resultObj) => {
+                                processResultMessage(resultObj, userMessage, conversationId);
+                            })
                             runningText = "";
                         }
                         catch { }
@@ -315,7 +346,9 @@ const Chat = () => {
                         abortFuncs.current = abortFuncs.current.filter(a => a !== abortController);
                         return;
                     }
-                    resultConversation.messages.push(...result.choices[0].messages);
+                    isEmpty(toolMessage) ?
+                        resultConversation.messages.push(assistantMessage) :
+                        resultConversation.messages.push(toolMessage, assistantMessage)
                 }else{
                     resultConversation = {
                         id: result.history_metadata.conversation_id,
@@ -323,7 +356,9 @@ const Chat = () => {
                         messages: [userMessage],
                         date: result.history_metadata.date
                     }
-                    resultConversation.messages.push(...result.choices[0].messages);
+                    isEmpty(toolMessage) ?
+                        resultConversation.messages.push(assistantMessage) :
+                        resultConversation.messages.push(toolMessage, assistantMessage)
                 }
                 if(!resultConversation){
                     setIsLoading(false);
@@ -332,7 +367,9 @@ const Chat = () => {
                     return;
                 }
                 appStateContext?.dispatch({ type: 'UPDATE_CURRENT_CHAT', payload: resultConversation });
-                setMessages([...messages, ...result.choices[0].messages]);
+                isEmpty(toolMessage) ?
+                    setMessages([...messages, assistantMessage]) :
+                    setMessages([...messages, toolMessage, assistantMessage]);     
             }
             
         } catch ( e )  {
@@ -346,7 +383,7 @@ const Chat = () => {
                 }
                 let errorChatMsg: ChatMessage = {
                     id: uuid(),
-                    role: "error",
+                    role: ERROR,
                     content: errorMessage,
                     date: new Date().toISOString()
                 }
@@ -436,7 +473,6 @@ const Chat = () => {
 
     useEffect(() => {
         if (appStateContext?.state.currentChat) {
-
             setMessages(appStateContext.state.currentChat.messages)
         }else{
             setMessages([])
@@ -461,7 +497,7 @@ const Chat = () => {
                             let errorMessage = "An error occurred. Answers can't be saved at this time. If the problem persists, please contact the site administrator.";
                             let errorChatMsg: ChatMessage = {
                                 id: uuid(),
-                                role: "error",
+                                role: ERROR,
                                 content: errorMessage,
                                 date: new Date().toISOString()
                             }
@@ -494,8 +530,8 @@ const Chat = () => {
     }, [processMessages]);
 
     useEffect(() => {
-        getUserInfoList();
-    }, []);
+        if (AUTH_ENABLED !== undefined) getUserInfoList();
+    }, [AUTH_ENABLED]);
 
     useLayoutEffect(() => {
         chatMessageStreamEnd.current?.scrollIntoView({ behavior: "smooth" })
@@ -574,7 +610,7 @@ const Chat = () => {
                                                     }}
                                                     onCitationClicked={c => onShowCitation(c)}
                                                 />
-                                            </div> : answer.role === "error" ? <div className={styles.chatMessageError}>
+                                            </div> : answer.role === ERROR ? <div className={styles.chatMessageError}>
                                                 <Stack horizontal className={styles.chatMessageErrorContent}>
                                                     <ErrorCircleRegular className={styles.errorIcon} style={{color: "rgba(182, 52, 67, 1)"}} />
                                                     <span>Error</span>
@@ -623,12 +659,15 @@ const Chat = () => {
                                         icon: { 
                                             color: '#FFFFFF',
                                         },
+                                        iconDisabled: {
+                                            color: "#BDBDBD !important"
+                                        },
                                         root: {
                                             color: '#FFFFFF',
                                             background: "radial-gradient(109.81% 107.82% at 100.1% 90.19%, #0F6CBD 33.63%, #2D87C3 70.31%, #8DDDD8 100%)"
                                         },
                                         rootDisabled: {
-                                            background: "#BDBDBD"
+                                            background: "#F0F0F0"
                                         }
                                     }}
                                     className={styles.newChatIcon}
@@ -643,11 +682,16 @@ const Chat = () => {
                                         icon: { 
                                             color: '#FFFFFF',
                                         },
+                                        iconDisabled: {
+                                            color: "#BDBDBD !important" ,
+                                        },
                                         root: {
                                             color: '#FFFFFF',
-                                            background: disabledButton() ? "#BDBDBD" : "radial-gradient(109.81% 107.82% at 100.1% 90.19%, #0F6CBD 33.63%, #2D87C3 70.31%, #8DDDD8 100%)",
-                                            cursor: disabledButton() ? "" : "pointer"
+                                            background: "radial-gradient(109.81% 107.82% at 100.1% 90.19%, #0F6CBD 33.63%, #2D87C3 70.31%, #8DDDD8 100%)",
                                         },
+                                        rootDisabled: {
+                                            background: "#F0F0F0"
+                                        }
                                     }}
                                     className={appStateContext?.state.isCosmosDBAvailable?.status !== CosmosDBStatus.NotConfigured ? styles.clearChatBroom : styles.clearChatBroomNoCosmos}
                                     iconProps={{ iconName: 'Broom' }}
